@@ -933,8 +933,9 @@ public class WifiMetrics {
      */
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
         synchronized (mLock) {
-            if (args.length > 0 && PROTO_DUMP_ARG.equals(args[0])) {
-                // Dump serialized WifiLog proto
+            pw.println("WifiMetrics:");
+            if ((args != null) && args.length > 0 && PROTO_DUMP_ARG.equals(args[0])) {
+                //Dump serialized WifiLog proto
                 consolidateProto(true);
                 for (ConnectionEvent event : mConnectionEventList) {
                     if (mCurrentConnectionEvent != event) {

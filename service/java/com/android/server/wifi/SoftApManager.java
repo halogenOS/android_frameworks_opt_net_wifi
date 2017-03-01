@@ -35,6 +35,7 @@ import com.android.server.wifi.util.ApConfigUtil;
 
 import java.util.ArrayList;
 import java.util.Locale;
+import android.os.UserHandle;
 
 /**
  * Manage WiFi in AP mode.
@@ -49,7 +50,10 @@ public class SoftApManager {
 
     private final String mCountryCode;
 
-    private final String mInterfaceName;
+    private  String mInterfaceName;
+    private boolean mCreateNewInterface = false;
+    private int mSoftApChannel = 0;
+    private String mTetherInterfaceName;
 
     private final SoftApStateMachine mStateMachine;
 
@@ -111,6 +115,23 @@ public class SoftApManager {
     }
 
     /**
+     * Set SoftAp channel
+     * @param channel is channel number
+     */
+    public void setSapChannel(int channel) {
+        mSoftApChannel = channel;
+    }
+
+    /**
+     * Set SoftAp interfcae name
+     * @param name name of the interface
+     */
+    public void setSapInterfaceName(String name) {
+        mInterfaceName = name;
+        mCreateNewInterface = true;
+    }
+
+    /**
      * Start a soft AP instance with the given configuration.
      * @param config AP configuration
      * @return integer result code
@@ -132,7 +153,7 @@ public class SoftApManager {
         }
 
         /* Setup country code if it is provide. */
-        if (mCountryCode != null) {
+        if (mCountryCode != null && (mCountryCode.length() != 0)) {
             /**
              * Country code is mandatory for 5GHz band, return an error if failed to set
              * country code when AP is configured for 5GHz band.
@@ -146,6 +167,14 @@ public class SoftApManager {
         }
 
         try {
+            if (mCreateNewInterface) {
+                mNmService.createSoftApInterface(mInterfaceName);
+                if ((localConfig.apBand != WifiConfiguration.AP_BAND_5GHZ)
+                       && (mSoftApChannel != 0)) {
+                    localConfig.apBand = WifiConfiguration.AP_BAND_2GHZ;
+                    localConfig.apChannel = mSoftApChannel;
+                }
+            }
             mNmService.startAccessPoint(localConfig, mInterfaceName);
         } catch (Exception e) {
             Log.e(TAG, "Exception in starting soft AP: " + e);
@@ -163,6 +192,9 @@ public class SoftApManager {
     private void stopSoftAp() {
         try {
             mNmService.stopAccessPoint(mInterfaceName);
+            if (mCreateNewInterface) {
+                mNmService.deleteSoftApInterface(mInterfaceName);
+            }
         } catch (Exception e) {
             Log.e(TAG, "Exception in stopping soft AP: " + e);
             return;

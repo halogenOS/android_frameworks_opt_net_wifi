@@ -81,6 +81,10 @@ public class WifiMonitor {
     private static final int UNKNOWN      = 14;
     private static final int SCAN_FAILED  = 15;
 
+    /** Vendor defined events from supplicant daemon */
+    private static final int WIFI_VENDOR_EVENT_BASE = 255;
+    private static final int SUBNET_STATUS_UPDATE = WIFI_VENDOR_EVENT_BASE + 1;
+
     /** All events coming from the supplicant start with this prefix */
     private static final String EVENT_PREFIX_STR = "CTRL-EVENT-";
     private static final int EVENT_PREFIX_LEN_STR = EVENT_PREFIX_STR.length();
@@ -429,6 +433,12 @@ public class WifiMonitor {
      */
     private static final String P2P_SERV_DISC_RESP_STR = "P2P-SERV-DISC-RESP";
 
+    /* P2P-REMOVE-AND-REFORM-GROUP */
+    /* Supplicant is supposed to generate this event only when p2p
+     * is connected
+     */
+    private static final String P2P_REMOVE_AND_REFORM_GROUP_STR = "P2P-REMOVE-AND-REFORM-GROUP";
+
     private static final String HOST_AP_EVENT_PREFIX_STR = "AP";
     /* AP-STA-CONNECTED 42:fc:89:a8:96:09 dev_addr=02:90:4c:a0:92:54 */
     private static final String AP_STA_CONNECTED_STR = "AP-STA-CONNECTED";
@@ -437,8 +447,12 @@ public class WifiMonitor {
     private static final String ANQP_DONE_STR = "ANQP-QUERY-DONE";
     private static final String HS20_ICON_STR = "RX-HS20-ICON";
 
+    /* WPA_EVENT_SUBNET_STATUS_UPDATE status=0|1|2 */
+    private static final String SUBNET_STATUS_UPDATE_STR ="SUBNET-STATUS-UPDATE";
+
     /* Supplicant events reported to a state machine */
     private static final int BASE = Protocol.BASE_WIFI_MONITOR;
+    private static final int VENDOR_BASE_WIFI_MONITOR = 255;
 
     /* Connection to supplicant established */
     public static final int SUP_CONNECTION_EVENT                 = BASE + 1;
@@ -497,6 +511,7 @@ public class WifiMonitor {
     public static final int P2P_FIND_STOPPED_EVENT               = BASE + 37;
     public static final int P2P_SERV_DISC_RESP_EVENT             = BASE + 38;
     public static final int P2P_PROV_DISC_FAILURE_EVENT          = BASE + 39;
+    public static final int P2P_REMOVE_AND_REFORM_GROUP_EVENT    = BASE + 40;
 
     /* hostap events */
     public static final int AP_STA_DISCONNECTED_EVENT            = BASE + 41;
@@ -513,6 +528,9 @@ public class WifiMonitor {
 
     /* hotspot 2.0 events */
     public static final int HS20_REMEDIATION_EVENT               = BASE + 61;
+
+    /* subnet status change event */
+    public static final int SUBNET_STATUS_UPDATE_EVENT           = VENDOR_BASE_WIFI_MONITOR + 62;
 
     /**
      * This indicates a read error on the monitor socket conenction
@@ -597,9 +615,9 @@ public class WifiMonitor {
                 new MonitorThread(mWifiNative.getLocalLog()).start();
                 return true;
             }
-            if (connectTries++ < 5) {
+            if (connectTries++ < 50) {
                 try {
-                    Thread.sleep(1000);
+                    Thread.sleep(100);
                 } catch (InterruptedException ignore) {
                 }
             } else {
@@ -763,11 +781,17 @@ public class WifiMonitor {
             int space = eventStr.indexOf(' ');
             if (space != -1) {
                 iface = eventStr.substring(7, space);
-                if (!mHandlerMap.containsKey(iface) && iface.startsWith("p2p-")) {
-                    // p2p interfaces are created dynamically, but we have
-                    // only one P2p state machine monitoring all of them; look
-                    // for it explicitly, and send messages there ..
-                    iface = "p2p0";
+                if (!mHandlerMap.containsKey(iface)) {
+                        if (iface.startsWith("p2p-")) {
+                            // p2p interfaces are created dynamically, but we have
+                            // only one P2p state machine monitoring all of them; look
+                            // for it explicitly, and send messages there ..
+                            iface = "p2p0";
+                        } else {
+                            Log.i(TAG, "Ignoring event from unexpected interface: "
+                                  + eventStr);
+                            return false;
+                        }
                 }
                 eventStr = eventStr.substring(space + 1);
             } else {
@@ -812,7 +836,10 @@ public class WifiMonitor {
         }
 
         if (!eventStr.startsWith(EVENT_PREFIX_STR)) {
-            if (eventStr.startsWith(WPS_SUCCESS_STR)) {
+            if (eventStr.startsWith(WPA_EVENT_PREFIX_STR) &&
+                    0 < eventStr.indexOf(PASSWORD_MAY_BE_INCORRECT_STR)) {
+                sendMessage(iface, AUTHENTICATION_FAILURE_EVENT);
+            } else if (eventStr.startsWith(WPS_SUCCESS_STR)) {
                 sendMessage(iface, WPS_SUCCESS_EVENT);
             } else if (eventStr.startsWith(WPS_FAIL_STR)) {
                 handleWpsFailEvent(eventStr, iface);
@@ -921,6 +948,8 @@ public class WifiMonitor {
             event = BSS_ADDED;
         } else if (eventName.equals(BSS_REMOVED_STR)) {
             event = BSS_REMOVED;
+        } else if (eventName.equals(SUBNET_STATUS_UPDATE_STR)) {
+            event = SUBNET_STATUS_UPDATE;
         } else
             event = UNKNOWN;
 
@@ -1064,6 +1093,10 @@ public class WifiMonitor {
 
             case SCAN_FAILED:
                 sendMessage(iface, SCAN_FAILED_EVENT);
+                break;
+
+            case SUBNET_STATUS_UPDATE:
+                handleSupplicantVendorDebugEvent(iface, remainder);
                 break;
 
             case UNKNOWN:
@@ -1221,6 +1254,9 @@ public class WifiMonitor {
             } else {
                 Log.e(TAG, "Null service resp " + dataString);
             }
+        } else if (dataString.startsWith(P2P_REMOVE_AND_REFORM_GROUP_STR)) {
+            Log.d(TAG, "Received event= " + dataString);
+            sendMessage(iface, P2P_REMOVE_AND_REFORM_GROUP_EVENT);
         }
     }
 
@@ -1450,5 +1486,48 @@ public class WifiMonitor {
                     + " reason=" + Integer.toString(reason));
             sendMessage(iface, NETWORK_DISCONNECTION_EVENT, local, reason, BSSID);
         }
+    }
+
+    /**
+     * Send subnet change status to state machine
+     */
+    private void notifyIpSubnetStatusChange(String iface, int subnetStatus) {
+        /* valid values for subnet status are:
+         * 0 = unknown, 1 = unchanged, 2 = changed
+         */
+        if (subnetStatus < 0 || subnetStatus > 2) {
+            Log.e(TAG, "Invalid IP subnet status: " + subnetStatus);
+            return;
+        }
+
+        sendMessage(iface, SUBNET_STATUS_UPDATE_EVENT, subnetStatus);
+    }
+
+    /**
+     * Handle vendor specific events from the supplicant
+     */
+    private void handleSupplicantVendorDebugEvent(String iface, String eventStr) {
+        int subnetStatus = 0;
+
+        if (DBG) Log.w(TAG, "IP subnet status change event - " + eventStr);
+
+        String[] tokens = eventStr.split(" ");
+        if (tokens.length < 2) {
+            Log.e(TAG, "IP subnet status event: Invalid tokens");
+            return;
+        }
+        String[] nameValue = tokens[1].split("=");
+        if (nameValue.length != 2) {
+            Log.e(TAG, "IP subnet status event: Invalid nameValue");
+            return;
+        }
+
+        try {
+            subnetStatus = Integer.parseInt(nameValue[1]);
+        } catch (NumberFormatException e) {
+             e.printStackTrace();
+        }
+
+        notifyIpSubnetStatusChange(iface, subnetStatus);
     }
 }

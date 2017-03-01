@@ -379,10 +379,20 @@ public class WifiConfigManager {
                 R.integer.config_wifi_network_switching_blacklist_time);
 
         boolean hs2on = mContext.getResources().getBoolean(R.bool.config_wifi_hotspot2_enabled);
-        Log.d(Utils.hs2LogTag(getClass()), "Passpoint is " + (hs2on ? "enabled" : "disabled"));
+        boolean hs2onSet = (Settings.Global.getInt(mContext.getContentResolver(),
+                               Settings.Global.WIFI_HOTSPOT2_ENABLED, 0) == 1);
+        Log.d(Utils.hs2LogTag(getClass()), "Passpoint is " +
+                (hs2on ? "enabled" : "disabled") + ", " + hs2onSet);
 
         mConfiguredNetworks = new ConfigurationMap(userManager);
-        mMOManager = new PasspointManagementObjectManager(new File(PPS_FILE), hs2on);
+
+        if (mContext.getResources().getBoolean(
+                com.android.internal.R.bool.config_passpoint_setting_on)) {
+            mMOManager = new PasspointManagementObjectManager(new File(PPS_FILE), hs2onSet);
+        } else {
+            mMOManager = new PasspointManagementObjectManager(new File(PPS_FILE), hs2on);
+        }
+
         mEnableOsuQueries = true;
         mAnqpCache = new AnqpCache(mClock);
         mSupplicantBridgeCallbacks = new SupplicantBridgeCallbacks();
@@ -398,6 +408,23 @@ public class WifiConfigManager {
 
     public void trimANQPCache(boolean all) {
         mAnqpCache.clear(all, DBG);
+    }
+
+    public HashSet<Integer> getConfiguredChannelList() {
+    /* Hashset will avoid any duplicate frequency to be added in hashmap */
+        HashSet<Integer> freqs = new HashSet<Integer>();
+        for(WifiConfiguration config : mConfiguredNetworks.valuesForAllUsers()) {
+            if (getScanDetailCache(config) != null) {
+                for(ScanDetail scanDetail : getScanDetailCache(config).values()) {
+                    ScanResult result = scanDetail.getScanResult();
+                    freqs.add(result.frequency);
+                }
+            }
+        }
+        if (freqs.isEmpty())
+            return null;
+        else
+            return freqs;
     }
 
     void enableVerboseLogging(int verbose) {
@@ -1642,6 +1669,7 @@ public class WifiConfigManager {
 
         final Map<String, WifiConfiguration> configs = new HashMap<>();
         final SparseArray<Map<String, String>> networkExtras = new SparseArray<>();
+        mScanDetailCaches.clear();
         mLastPriority = mWifiConfigStore.loadNetworks(configs, networkExtras);
 
         readNetworkHistory(configs);

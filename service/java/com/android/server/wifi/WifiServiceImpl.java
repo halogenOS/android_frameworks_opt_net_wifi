@@ -30,6 +30,7 @@ import static com.android.server.wifi.WifiController.CMD_WIFI_TOGGLED;
 
 import android.Manifest;
 import android.app.ActivityManager;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.app.AppOpsManager;
 import android.bluetooth.BluetoothAdapter;
 import android.content.BroadcastReceiver;
@@ -63,6 +64,7 @@ import android.os.BatteryStats;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -94,7 +96,15 @@ import com.android.server.wifi.configparse.ConfigBuilder;
 import org.xml.sax.SAXException;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.EOFException;
+import java.io.File;
 import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.nio.channels.FileChannel;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
@@ -112,6 +122,8 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import android.app.AppOpsManager;
+import android.os.SystemProperties;
 
 /**
  * WifiService handles remote WiFi operation requests by implementing
@@ -123,6 +135,8 @@ public class WifiServiceImpl extends IWifiManager.Stub {
     private static final String TAG = "WifiService";
     private static final boolean DBG = true;
     private static final boolean VDBG = false;
+    private boolean mIsFactoryResetOn = false;
+    private boolean mSubSystemRestart = false;
     private static final String BOOT_DEFAULT_WIFI_COUNTRY_CODE = "ro.boot.wificountrycode";
 
     final WifiStateMachine mWifiStateMachine;
@@ -130,6 +144,19 @@ public class WifiServiceImpl extends IWifiManager.Stub {
     private final Context mContext;
     private final FrameworkFacade mFacade;
 
+    private SoftApStateMachine mSoftApStateMachine;
+    private int mStaAndApConcurrency = 0;
+    private String mSoftApInterfaceName = null;
+    private int mSoftApChannel = 0;
+    private static final String SEPARATOR_KEY = "\n";
+    private static final String ENABLE_STA_SAP
+            = "ENABLE_STA_SAP_CONCURRENCY:";
+    private static final String SAP_INTERFACE_NAME
+            = "SAP_INTERFACE_NAME:";
+    private static final String SAP_CHANNEL
+            = "SAP_CHANNEL:";
+    private static final String mConcurrencyCfgTemplateFile =
+            "/etc/wifi/wifi_concurrency_cfg.txt";
     private final List<Multicaster> mMulticasters =
             new ArrayList<Multicaster>();
     private int mMulticastEnabled;
@@ -155,6 +182,7 @@ public class WifiServiceImpl extends IWifiManager.Stub {
     private final WifiCertManager mCertManager;
 
     private final WifiInjector mWifiInjector;
+    private boolean mIsControllerStarted = false;
     /**
      * Asynchronous channel to WifiStateMachine
      */
@@ -346,6 +374,20 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         mWifiStateMachineHandler = new WifiStateMachineHandler(wifiThread.getLooper());
         mWifiController = new WifiController(mContext, mWifiStateMachine,
                 mSettingsStore, mWifiLockManager, wifiThread.getLooper(), mFacade);
+        if (ensureConcurrencyFileExist()) {
+            readConcurrencyConfig();
+        }
+        if (mStaAndApConcurrency == 1) {
+            mWifiStateMachine.setStaSoftApConcurrency();
+            mSoftApStateMachine = mWifiStateMachine.getSoftApStateMachine();
+            if (mSoftApInterfaceName != null) {
+                mSoftApStateMachine.setSoftApInterfaceName(mSoftApInterfaceName);
+            }
+            if (mSoftApChannel != 0) {
+                mSoftApStateMachine.setSoftApChannel(mSoftApChannel);
+            }
+            mWifiController.setSoftApStateMachine(mSoftApStateMachine);
+        }
         // Set the WifiController for WifiLastResortWatchdog
         mWifiInjector.getWifiLastResortWatchdog().setWifiController(mWifiController);
     }
@@ -405,6 +447,7 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         mInIdleMode = mPowerManager.isDeviceIdleMode();
 
         mWifiController.start();
+        mIsControllerStarted = true;
 
         // If we are already disabled (could be due to airplane mode), avoid changing persist
         // state here
@@ -541,6 +584,10 @@ public class WifiServiceImpl extends IWifiManager.Stub {
                 "ConnectivityService");
     }
 
+    private boolean isStrictOpEnable() {
+        return SystemProperties.getBoolean("persist.sys.strict_op_enable", false);
+    }
+
     /**
      * see {@link android.net.wifi.WifiManager#setWifiEnabled(boolean)}
      * @param enable {@code true} to enable, {@code false} to disable.
@@ -551,7 +598,16 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         enforceChangePermission();
         Slog.d(TAG, "setWifiEnabled: " + enable + " pid=" + Binder.getCallingPid()
                     + ", uid=" + Binder.getCallingUid());
-
+        if(isStrictOpEnable()){
+            String packageName = mContext.getPackageManager().getNameForUid(Binder.getCallingUid());
+            if((Binder.getCallingUid() > 10000) && (packageName.indexOf("android.uid.systemui") !=0)  && (packageName.indexOf("android.uid.system") != 0)) {
+                AppOpsManager mAppOpsManager  = mContext.getSystemService(AppOpsManager.class);
+                int result = mAppOpsManager.noteOp(AppOpsManager.OP_CHANGE_WIFI_STATE,Binder.getCallingUid(),packageName);
+                if(result == AppOpsManager.MODE_IGNORED){
+                    return false;
+                }
+            }
+        }
         /*
         * Caller might not have WRITE_SECURE_SETTINGS,
         * only CHANGE_WIFI_STATE is enforced
@@ -567,6 +623,10 @@ public class WifiServiceImpl extends IWifiManager.Stub {
             Binder.restoreCallingIdentity(ident);
         }
 
+        if (!mIsControllerStarted) {
+            Slog.e(TAG,"WifiController is not yet started, abort setWifiEnabled");
+            return false;
+        }
         mWifiController.sendMessage(CMD_WIFI_TOGGLED);
         return true;
     }
@@ -1187,7 +1247,10 @@ public class WifiServiceImpl extends IWifiManager.Stub {
 
         if (dhcpResults.ipAddress != null &&
                 dhcpResults.ipAddress.getAddress() instanceof Inet4Address) {
-            info.ipAddress = NetworkUtils.inetAddressToInt((Inet4Address) dhcpResults.ipAddress.getAddress());
+            info.ipAddress = NetworkUtils.inetAddressToInt(
+               (Inet4Address) dhcpResults.ipAddress.getAddress());
+            info.netmask = NetworkUtils.prefixLengthToNetmaskInt(
+            dhcpResults.ipAddress.getNetworkPrefixLength());
         }
 
         if (dhcpResults.gateway != null) {
@@ -1380,6 +1443,46 @@ public class WifiServiceImpl extends IWifiManager.Stub {
                 mWifiController.sendMessage(CMD_EMERGENCY_CALL_STATE_CHANGED, inCall ? 1 : 0, 0);
             } else if (action.equals(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)) {
                 handleIdleModeChanged();
+            } else if (action.equals(WifiManager.WIFI_STATE_CHANGED_ACTION)) {
+               int state  = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE,
+                                WifiManager.WIFI_STATE_UNKNOWN);
+               if (state  == WifiManager.WIFI_STATE_ENABLED) {
+                   if (mIsFactoryResetOn) {
+                       resetWifiNetworks();
+                       mIsFactoryResetOn = false;
+                   }
+                   if (mSubSystemRestart) {
+                       setWifiApEnabled(null, true);
+                   }
+               } else if ( state ==  WifiManager.WIFI_STATE_DISABLED) {
+                   if (mSubSystemRestart) {
+                       setWifiEnabled(true);
+                   }
+               }
+            } else if (action.equals(WifiManager.WIFI_AP_STATE_CHANGED_ACTION)) {
+               int wifiApState = intent.getIntExtra(WifiManager.EXTRA_WIFI_AP_STATE,
+                        WifiManager.WIFI_AP_STATE_FAILED);
+               if (mSubSystemRestart) {
+                   if (wifiApState == WifiManager.WIFI_AP_STATE_DISABLED) {
+                       if (getWifiEnabledState() == WifiManager.WIFI_STATE_ENABLED) {
+                           setWifiEnabled(false);
+                       } else {
+                           /**
+                            * STA in DISABLED state, hence just restart SAP.
+                            * This should cover two scenarios
+                            * 1. Only SAP ON ( before SSR ) in STA + SAP.
+                            * 2. No STA + SAP.
+                            */
+                           setWifiApEnabled(null, true);
+                           mSubSystemRestart = false;
+                       }
+                   } else if (wifiApState == WifiManager.WIFI_AP_STATE_ENABLED) {
+                       mSubSystemRestart = false;
+                   }
+                }
+
+            } else if (action.equals(WifiManager.WIFI_AP_SUB_SYSTEM_RESTART)) {
+               handleSubSystemRestart();
             }
         }
     };
@@ -1408,10 +1511,12 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         intentFilter.addAction(Intent.ACTION_SCREEN_OFF);
         intentFilter.addAction(Intent.ACTION_BATTERY_CHANGED);
         intentFilter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+        intentFilter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         intentFilter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
         intentFilter.addAction(TelephonyIntents.ACTION_EMERGENCY_CALLBACK_MODE_CHANGED);
         intentFilter.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
-
+        intentFilter.addAction(WifiManager.WIFI_AP_SUB_SYSTEM_RESTART);
+        intentFilter.addAction(WifiManager.WIFI_AP_STATE_CHANGED_ACTION);
         boolean trackEmergencyCallState = mContext.getResources().getBoolean(
                 com.android.internal.R.bool.config_wifi_turn_off_during_emergency_call);
         if (trackEmergencyCallState) {
@@ -1671,6 +1776,7 @@ public class WifiServiceImpl extends IWifiManager.Stub {
     public void enableVerboseLogging(int verbose) {
         enforceAccessPermission();
         mWifiStateMachine.enableVerboseLogging(verbose);
+        mWifiController.enableVerboseLogging(verbose);
         mWifiLockManager.enableVerboseLogging(verbose);
     }
 
@@ -1721,6 +1827,21 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         }
     }
 
+    public boolean getWifiStaSapConcurrency() {
+        return mStaAndApConcurrency == 1;
+    }
+
+    private void resetWifiNetworks() {
+        // Delete all Wifi SSIDs
+        List<WifiConfiguration> networks = getConfiguredNetworks();
+        if (networks != null) {
+            for (WifiConfiguration config : networks) {
+                 removeNetwork(config.networkId);
+            }
+            saveConfiguration();
+        }
+    }
+
     public void factoryReset() {
         enforceConnectivityInternalPermission();
 
@@ -1734,15 +1855,12 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         }
 
         if (!mUserManager.hasUserRestriction(UserManager.DISALLOW_CONFIG_WIFI)) {
-            // Enable wifi
-            setWifiEnabled(true);
-            // Delete all Wifi SSIDs
-            List<WifiConfiguration> networks = getConfiguredNetworks();
-            if (networks != null) {
-                for (WifiConfiguration config : networks) {
-                    removeNetwork(config.networkId);
-                }
-                saveConfiguration();
+            if (getWifiEnabledState() == WifiManager.WIFI_STATE_ENABLED) {
+                resetWifiNetworks();
+            } else {
+                mIsFactoryResetOn = true;
+                // Enable wifi
+                setWifiEnabled(true);
             }
         }
     }
@@ -1894,4 +2012,101 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         enforceConnectivityInternalPermission();
         mWifiStateMachine.enableWifiConnectivityManager(enabled);
     }
+
+     private void readConcurrencyConfig() {
+        BufferedReader reader = null;
+        try {
+            if (mConcurrencyCfgTemplateFile != null) {
+                Log.d(TAG, "mConcurrencyCfgTemplateFile : "
+                      + mConcurrencyCfgTemplateFile);
+            }
+            reader = new BufferedReader(new FileReader(mConcurrencyCfgTemplateFile));
+            for (String key = reader.readLine(); key != null;
+            key = reader.readLine()) {
+                if (key != null) {
+                    Log.d(TAG, "mConcurrencyCfgTemplateFile line: " + key);
+                }
+                if (key.startsWith(ENABLE_STA_SAP)) {
+                    String st = key.replace(ENABLE_STA_SAP, "");
+                    st = st.replace(SEPARATOR_KEY, "");
+                    try {
+                        mStaAndApConcurrency = Integer.parseInt(st);
+                        Log.d(TAG,"mConcurrencyCfgTemplateFile EnableConcurrency = "
+                              + mStaAndApConcurrency);
+                    } catch (NumberFormatException e) {
+                        Log.e(TAG,"mConcurrencyCfgTemplateFile: incorrect format :"
+                              + key);
+                    }
+                }
+                if (key.startsWith(SAP_INTERFACE_NAME)) {
+                    String st = key.replace(SAP_INTERFACE_NAME, "");
+                    st = st.replace(SEPARATOR_KEY, "");
+                    try {
+                        mSoftApInterfaceName = st;
+                        Log.d(TAG,"mConcurrencyCfgTemplateFile SAPInterfaceName = "
+                              + mSoftApInterfaceName);
+                    } catch (NumberFormatException e) {
+                        Log.e(TAG,"mConcurrencyCfgTemplateFile: incorrect format :"
+                              + key);
+                    }
+                }
+                if (key.startsWith(SAP_CHANNEL)) {
+                    String st = key.replace(SAP_CHANNEL, "");
+                    st = st.replace(SEPARATOR_KEY, "");
+                    try {
+                        mSoftApChannel = Integer.parseInt(st);
+                        Log.d(TAG,"mConcurrencyCfgTemplateFile SAPChannel = "
+                              + mSoftApChannel);
+                    } catch (NumberFormatException e) {
+                        Log.e(TAG,"mConcurrencyCfgTemplateFile: incorrect format :"
+                              + key);
+                    }
+                }
+            }
+       } catch (EOFException ignore) {
+            if (reader != null) {
+                try {
+                    reader.close();
+                    reader = null;
+                } catch (Exception e) {
+                    Log.e(TAG, "mConcurrencyCfgTemplateFile: Error closing file" + e);
+                }
+            }
+       } catch (IOException e) {
+            Log.e(TAG, "mConcurrencyCfgTemplateFile: Error parsing configuration" + e);
+       }
+       if (reader != null) {
+          try {
+              reader.close();
+          } catch (Exception e) {
+              Log.e(TAG, "mConcurrencyCfgTemplateFile: Error closing file" + e);
+          }
+       }
+    }
+
+    private boolean ensureConcurrencyFileExist() {
+        FileOutputStream dstStream = null;
+        FileInputStream srcStream = null;
+        DataInputStream in = null;
+        // check ConcurrencyCfgTemplateFile  exist
+        try {
+            in = new DataInputStream(new BufferedInputStream(new FileInputStream(
+                            mConcurrencyCfgTemplateFile)));
+        } catch (Exception e) {
+            Log.e(TAG, "ensureConcurrencyFile template file doesnt exist" + e);
+            return false;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException e) {}
+            }
+        }
+        return true;
+    }
+
+    private void handleSubSystemRestart() {
+       mSubSystemRestart = true;
+       setWifiApEnabled(null, false);
+   }
 }

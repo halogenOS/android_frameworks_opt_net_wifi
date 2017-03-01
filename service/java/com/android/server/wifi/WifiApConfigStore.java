@@ -20,6 +20,10 @@ import android.content.Context;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiConfiguration.KeyMgmt;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Message;
+import android.os.Messenger;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.internal.R;
@@ -54,6 +58,8 @@ public class WifiApConfigStore {
     private final String mApConfigFile;
     private final BackupManagerProxy mBackupManagerProxy;
 
+    private static boolean mEnableRegionalHotspotCheckbox = false;
+
     WifiApConfigStore(Context context, BackupManagerProxy backupManagerProxy) {
         this(context, backupManagerProxy, DEFAULT_AP_CONFIG_FILE);
     }
@@ -86,6 +92,11 @@ public class WifiApConfigStore {
 
             /* Save the default configuration to persistent storage. */
             writeApConfiguration(mApConfigFile, mWifiApConfig);
+        }
+        if (mContext.getResources().getBoolean(
+                    com.android.internal.R.bool.config_regional_hotspot_show_broadcast_ssid_checkbox
+        )) {
+            mEnableRegionalHotspotCheckbox = true;
         }
     }
 
@@ -135,6 +146,9 @@ public class WifiApConfigStore {
                 return null;
             }
             config.SSID = in.readUTF();
+            if (mEnableRegionalHotspotCheckbox) {
+                config.hiddenSSID = (in.readInt() != 0);
+            }
 
             if (version >= 2) {
                 config.apBand = in.readInt();
@@ -170,6 +184,9 @@ public class WifiApConfigStore {
                         new FileOutputStream(filename)))) {
             out.writeInt(AP_CONFIG_FILE_VERSION);
             out.writeUTF(config.SSID);
+            if (mEnableRegionalHotspotCheckbox) {
+                out.writeInt(config.hiddenSSID ? 1 : 0);
+            }
             out.writeInt(config.apBand);
             out.writeInt(config.apChannel);
             int authType = config.getAuthType();
@@ -192,10 +209,16 @@ public class WifiApConfigStore {
         WifiConfiguration config = new WifiConfiguration();
         config.SSID = mContext.getResources().getString(
                 R.string.wifi_tether_configure_ssid_default);
-        config.allowedKeyManagement.set(KeyMgmt.WPA2_PSK);
-        String randomUUID = UUID.randomUUID().toString();
-        //first 12 chars from xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-        config.preSharedKey = randomUUID.substring(0, 8) + randomUUID.substring(9, 13);
+        int wifiApSecurityType = mContext.getResources().getInteger(
+                R.integer.wifi_hotspot_security_type);
+        config.allowedKeyManagement.set(wifiApSecurityType);
+        config.preSharedKey = mContext.getResources().getString(
+                R.string.def_wifi_wifihotspot_pass);
+        if (TextUtils.isEmpty(config.preSharedKey)) {
+            String randomUUID = UUID.randomUUID().toString();
+            //first 12 chars from xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+            config.preSharedKey = randomUUID.substring(0, 8) + randomUUID.substring(9,13);
+        }
         return config;
     }
 }

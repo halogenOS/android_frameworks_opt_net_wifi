@@ -283,6 +283,15 @@ public class WifiConfigStore {
             config.getNetworkSelectionStatus().setNetworkSelectionBSSID(null);
         }
 
+        value = mWifiNative.getNetworkVariable(netId, WifiConfiguration.SIMNumVarName);
+        if (!TextUtils.isEmpty(value)) {
+            try {
+                config.SIMNum = Integer.parseInt(value);
+            } catch (NumberFormatException ignore) {
+                Log.e(TAG,"error in parsing Selected Sim number " + config.SIMNum);
+            }
+        }
+
         value = mWifiNative.getNetworkVariable(netId, WifiConfiguration.priorityVarName);
         config.priority = -1;
         if (!TextUtils.isEmpty(value)) {
@@ -717,6 +726,13 @@ public class WifiConfigStore {
                 loge("failed to set wep_tx_keyidx: " + config.wepTxKeyIndex);
                 return false;
             }
+        }
+        if (config.SIMNum != 0 && !mWifiNative.setNetworkVariable(
+                netId,
+                WifiConfiguration.SIMNumVarName,
+                Integer.toString(config.SIMNum))) {
+            loge(config.SIMNum + ": failed to set sim no: " + config.SIMNum);
+            return false;
         }
         if (!mWifiNative.setNetworkVariable(
                 netId,

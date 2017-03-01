@@ -54,6 +54,7 @@ public class WifiQualifiedNetworkSelector {
     private WifiNetworkScoreCache mNetworkScoreCache;
     private Clock mClock;
     private static final String TAG = "WifiQualifiedNetworkSelector:";
+    private boolean skipQualifiedNetworkSelectionForAutoConnect = false;
     // Always enable debugging logs for now since QNS is still a new feature.
     private static final boolean FORCE_DEBUG = true;
     private boolean mDbg = FORCE_DEBUG;
@@ -121,6 +122,7 @@ public class WifiQualifiedNetworkSelector {
 
     private void localLog(String log) {
         if (mDbg) {
+            Log.d(TAG, log);
             mLocalLog.log(log);
         }
     }
@@ -257,6 +259,9 @@ public class WifiQualifiedNetworkSelector {
         return true;
     }
 
+    public void skipQualifiedNetworkSelectionForAutoConnect(boolean enable) {
+          skipQualifiedNetworkSelectionForAutoConnect = enable;
+    }
     /**
      * check whether QualifiedNetworkSelection is needed or not
      *
@@ -281,6 +286,10 @@ public class WifiQualifiedNetworkSelector {
         // Do not trigger Qualified Network Selection during L2 link debouncing procedure
         if (isLinkDebouncing) {
             localLog("Need not Qualified Network Selection during L2 debouncing");
+            return false;
+        }
+        if (skipQualifiedNetworkSelectionForAutoConnect) {
+            localLog("Skip network selction, since auto connection disabled");
             return false;
         }
 

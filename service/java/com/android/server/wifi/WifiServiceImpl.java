@@ -636,10 +636,7 @@ public class WifiServiceImpl extends IWifiManager.Stub {
             Binder.restoreCallingIdentity(ident);
         }
 
-        if (!mIsControllerStarted) {
-            Slog.e(TAG,"WifiController is not yet started, abort setWifiEnabled");
-            return false;
-        }
+
 
         if (mPermissionReviewRequired) {
             final int wiFiEnabledState = getWifiEnabledState();
@@ -660,6 +657,10 @@ public class WifiServiceImpl extends IWifiManager.Stub {
             }
         }
 
+        if (!mIsControllerStarted) {
+            Slog.e(TAG,"WifiController is not yet started, abort setWifiEnabled");
+            return false;
+        }
         mWifiController.sendMessage(CMD_WIFI_TOGGLED);
         return true;
     }
@@ -1504,11 +1505,19 @@ public class WifiServiceImpl extends IWifiManager.Stub {
                    }
                } else if ( state ==  WifiManager.WIFI_STATE_DISABLED) {
                    if (mSubSystemRestart) {
+                       /*
+                       // Replace with this if there are problems:
                        try {
                            String packageName = mContext.getPackageManager().getNameForUid(Binder.getCallingUid());
                            setWifiEnabled(packageName, true);
                        } catch(RemoteException e) {
                            // fek
+                       }
+                       */
+                       try {
+                           setWifiEnabled(mContext.getPackageName(), true);
+                       } catch (RemoteException e) {
+                           throw e.rethrowFromSystemServer();
                        }
                    }
                }
@@ -1518,11 +1527,19 @@ public class WifiServiceImpl extends IWifiManager.Stub {
                if (mSubSystemRestart) {
                    if (wifiApState == WifiManager.WIFI_AP_STATE_DISABLED) {
                        if (getWifiEnabledState() == WifiManager.WIFI_STATE_ENABLED) {
+                           /*
+                           // Replace with this if there are problems:
                            try {
                                String packageName = mContext.getPackageManager().getNameForUid(Binder.getCallingUid());
                                setWifiEnabled(packageName, false);
                            } catch(RemoteException e) {
                                // fek
+                           }
+                           */
+                           try {
+                               setWifiEnabled(mContext.getPackageName(), false);
+                           } catch (RemoteException e) {
+                               throw e.rethrowFromSystemServer();
                            }
                        } else {
                            /**

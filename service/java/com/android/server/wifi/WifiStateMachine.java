@@ -1733,6 +1733,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
         }
         if (freqs == null) {
             if (settings != null && settings.channelSet != null) {
+                freqs = new HashSet<Integer>();
                 for (WifiChannel channel : settings.channelSet) {
                     freqs.add(channel.freqMHz);
                 }

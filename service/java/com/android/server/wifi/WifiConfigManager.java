@@ -278,7 +278,6 @@ public class WifiConfigManager {
     private final WifiInjector mWifiInjector;
     private final MacAddressUtil mMacAddressUtil;
     private boolean mConnectedMacRandomzationSupported;
-    private final Mac mMac;
 
     /**
      * Local log used for debugging any WifiConfigManager issues.
